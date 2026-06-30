@@ -1,90 +1,80 @@
 #!/usr/bin/env bash
-# 短信中间件 Linux 一键安装脚本
-# 用法：把编译好的 sms-middleware 二进制和本脚本放到同一目录，然后：
-#   sudo bash install.sh
-# 脚本会：写配置 → 安装 systemd 服务 → 启动 → 放行端口 → 给出自检命令。
-# 幂等：可重复运行，每次都会用你输入的新值更新配置并重启服务。
+# 短信中间件一键安装（自动从 GitHub Release 下载预编译二进制，无需装 Go）
+#
+# 用法（任选其一）：
+#   curl -fsSL https://raw.githubusercontent.com/xihu-stack/sms-middleware/main/install.sh | sudo bash
+#   sudo bash install.sh            # 当前目录有 sms-middleware 二进制时，优先用本地的（离线可用）
+#
+# 幂等：可重复运行，每次用新输入更新配置并重启服务。
 
 set -euo pipefail
 
+REPO="xihu-stack/sms-middleware"
 INSTALL_DIR=/opt/sms-middleware
-SERVICE_FILE=/etc/systemd/system/sms-middleware.service
-PORT="${LISTEN_PORT:-8080}"
+PORT=8080
 
-# ---- 前置检查 ----
-if [ "$(id -u)" -ne 0 ]; then
-  echo "请用 root 或 sudo 运行：sudo bash install.sh" >&2
-  exit 1
-fi
+[ "$(id -u)" -eq 0 ] || { echo "请用 sudo 运行：sudo bash install.sh"; exit 1; }
 
-BIN_SRC="$(dirname "$(readlink -f "$0")")/sms-middleware"
-if [ ! -f "$BIN_SRC" ]; then
-  echo "未找到 sms-middleware 二进制（应在脚本同目录）。" >&2
-  echo "请先把 sms-middleware 放到: $(dirname "$BIN_SRC")" >&2
-  exit 1
-fi
-
-# ---- 交互收集配置（回车保留旧值/默认值）----
-ask() { # ask "提示" "默认值"  -> 读到 $ANS
-  local prompt="$1" def="${2-}" v
-  read -rp "$prompt [${def:+$def}]: " v || v=""
-  ANS="${v:-$def}"
-}
-ask_secret() { # 静默读取，回车保留旧值
-  local prompt="$1" def="${2-}" v
-  if [ -n "$def" ]; then
-    read -rp "$prompt [回车保留已存的值]: " v || v=""
-    ANS="${v:-$def}"
+# 1) 取二进制：本地有就用本地，否则按架构从最新 Release 下载
+BIN="$PWD/sms-middleware"
+DOWNLOADED=0
+if [ ! -f "$BIN" ]; then
+  case "$(uname -m)" in
+    x86_64)         ARCH=amd64 ;;
+    aarch64|arm64)  ARCH=arm64 ;;
+    *) echo "不支持的架构: $(uname -m)（可手动编译后把 sms-middleware 放到当前目录重试）"; exit 1 ;;
+  esac
+  URL="https://github.com/$REPO/releases/latest/download/sms-middleware-linux-$ARCH"
+  echo "下载二进制: $URL"
+  TMP="$(mktemp)"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$URL" -o "$TMP"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$TMP" "$URL"
   else
-    read -rsp "$prompt: " v; echo
-    ANS="$v"
+    echo "需要 curl 或 wget 来下载二进制"; rm -f "$TMP"; exit 1
   fi
-}
+  BIN="$TMP"; DOWNLOADED=1
+fi
 
-echo "=== 配置阿里云短信（回车保留括号内默认值）==="
-oldval() { [ -f "$INSTALL_DIR/config.env" ] && grep -m1 -E "^$1=" "$INSTALL_DIR/config.env" 2>/dev/null | cut -d= -f2- || true; }
-OLD_AK="$(oldval ALIYUN_ACCESS_KEY_ID)"
-OLD_SK="$(oldval ALIYUN_ACCESS_KEY_SECRET)"
-OLD_SIGN="$(oldval ALIYUN_SIGN_NAME)"
-OLD_TPL="$(oldval ALIYUN_TEMPLATE_CODE)"
-OLD_TPL_KEY="$(oldval ALIYUN_TEMPLATE_PARAM_KEY)"; [ -z "$OLD_TPL_KEY" ] && OLD_TPL_KEY=content
-OLD_IP="$(oldval IP_ALLOWLIST)"
-OLD_REGION="$(oldval ALIYUN_REGION)"; [ -z "$OLD_REGION" ] && OLD_REGION=cn-hangzhou
+# 2) 收集配置（仅 5 项必填；其余用默认值，可之后改 config.env）
+old() { { [ -f "$INSTALL_DIR/config.env" ] && grep -m1 -E "^$1=" "$INSTALL_DIR/config.env" | cut -d= -f2-; } || true; }
+ask()  { local p="$1" d="${2-}" v; read -rp "$p${d:+ [$d]}: " v || v=""; ANS="${v:-$d}"; }
+asks() { local p="$1" d="${2-}" v; read -rsp "$p${d:+ (回车保留)}: " v; echo; ANS="${v:-$d}"; }
 
-ask       "AccessKey ID"        "${OLD_AK}";        AK="$ANS"
-ask_secret "AccessKey Secret"   "${OLD_SK}";        SK="$ANS"
-ask       "签名 SignName"       "${OLD_SIGN}";      SIGN="$ANS"
-ask       "模板 TemplateCode"   "${OLD_TPL}";       TPL="$ANS"
-ask       "模板变量名"           "${OLD_TPL_KEY:-content}"; TPL_KEY="$ANS"
-ask       "IP白名单(逗号分隔CIDR/IP)" "${OLD_IP:-}";  IP="$ANS"
-ask       "地域 Region"         "${OLD_REGION}";    REGION="$ANS"
-ask       "监听端口"            "$PORT";            PORT="$ANS"
+echo "=== 阿里云短信配置（回车保留已存值）==="
+ask  "AccessKey ID"             "$(old ALIYUN_ACCESS_KEY_ID)";     AK="$ANS"
+asks "AccessKey Secret"         "$(old ALIYUN_ACCESS_KEY_SECRET)"; SK="$ANS"
+ask  "签名 SignName"            "$(old ALIYUN_SIGN_NAME)";         SIGN="$ANS"
+ask  "模板 TemplateCode"        "$(old ALIYUN_TEMPLATE_CODE)";     TPL="$ANS"
+ask  "IP白名单(CIDR/IP,逗号分隔)" "$(old IP_ALLOWLIST)";             IP="$ANS"
 
 if [ -z "$AK" ] || [ -z "$SK" ] || [ -z "$SIGN" ] || [ -z "$TPL" ]; then
-  echo "AccessKey/签名/模板不能为空，已中止。" >&2; exit 1
+  echo "AccessKey / 签名 / 模板 不能为空，已中止。" >&2; exit 1
 fi
 
-# ---- 安装二进制 + 写配置 ----
+# 3) 落盘二进制 + 配置
 mkdir -p "$INSTALL_DIR"
-install -m 0755 "$BIN_SRC" "$INSTALL_DIR/sms-middleware"
+install -m 0755 "$BIN" "$INSTALL_DIR/sms-middleware"
+[ "$DOWNLOADED" = 1 ] && rm -f "$BIN"
 
 cat > "$INSTALL_DIR/config.env" <<EOF
 LISTEN=:$PORT
 IP_ALLOWLIST=$IP
-ALIYUN_REGION=$REGION
+ALIYUN_REGION=cn-hangzhou
 ALIYUN_ACCESS_KEY_ID=$AK
 ALIYUN_ACCESS_KEY_SECRET=$SK
 ALIYUN_SIGN_NAME=$SIGN
 ALIYUN_TEMPLATE_CODE=$TPL
-ALIYUN_TEMPLATE_PARAM_KEY=$TPL_KEY
+ALIYUN_TEMPLATE_PARAM_KEY=content
 ALIYUN_TIMEOUT=5s
 ALIYUN_ENDPOINT=https://dysmsapi.aliyuncs.com
 EOF
 chmod 600 "$INSTALL_DIR/config.env"
 echo "已写入 $INSTALL_DIR/config.env"
 
-# ---- 安装 systemd 服务 ----
-cat > "$SERVICE_FILE" <<EOF
+# 4) 安装 systemd 服务
+cat > /etc/systemd/system/sms-middleware.service <<EOF
 [Unit]
 Description=SMS Middleware (Aliyun SMS relay)
 After=network-online.target
@@ -106,26 +96,24 @@ ReadWritePaths=$INSTALL_DIR
 [Install]
 WantedBy=multi-user.target
 EOF
-
 systemctl daemon-reload
 systemctl enable --now sms-middleware
 sleep 1
 
-# ---- 放行端口（尽力而为）----
+# 5) 放行端口（尽力而为，失败不中断）
 if command -v firewall-cmd >/dev/null 2>&1; then
-  firewall-cmd --add-port="$PORT"/tcp --permanent >/dev/null 2>&1 || true
+  firewall-cmd --add-port=$PORT/tcp --permanent >/dev/null 2>&1 || true
   firewall-cmd --reload >/dev/null 2>&1 || true
   echo "firewalld: 已放行 $PORT/tcp"
 elif command -v ufw >/dev/null 2>&1; then
-  ufw allow "$PORT"/tcp >/dev/null 2>&1 || true
+  ufw allow $PORT/tcp >/dev/null 2>&1 || true
   echo "ufw: 已放行 $PORT/tcp"
 fi
 
-# ---- 结果 ----
 echo
-echo "=== 安装完成 ==="
-systemctl --no-pager --lines=5 status sms-middleware || true
+echo "=== ✅ 安装完成 ==="
+systemctl --no-pager --lines=3 status sms-middleware || true
 echo
-echo "查看日志:   sudo journalctl -u sms-middleware -f"
-echo "重启服务:   sudo systemctl restart sms-middleware"
-echo "自检发一条: curl -X POST http://127.0.0.1:$PORT/sms/send -H 'Content-Type: application/json' -d '{\"to\":\"你的手机号\",\"content\":\"部署自检\"}'"
+echo "自检发一条: curl -X POST http://127.0.0.1:$PORT/sms/send -H 'Content-Type: application/json' -d '{\"to\":\"你的手机号\",\"content\":\"机房告警：联调测试\"}'"
+echo "看日志:     sudo journalctl -u sms-middleware -f"
+echo "改配置后:   sudo systemctl restart sms-middleware"
