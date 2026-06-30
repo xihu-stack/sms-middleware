@@ -1,0 +1,35 @@
+# 短信中间件 systemd 服务单元
+# 安装：
+#   sudo cp deploy/sms-middleware.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now sms-middleware
+# 查日志：
+#   sudo journalctl -u sms-middleware -f
+
+[Unit]
+Description=SMS Middleware (Aliyun SMS relay)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/sms-middleware
+EnvironmentFile=/opt/sms-middleware/config.env
+ExecStart=/opt/sms-middleware/sms-middleware
+Restart=on-failure
+RestartSec=3
+
+# 以非特权身份运行；默认端口 8080 > 1024，无需 root
+User=nobody
+Group=nogroup
+
+# 安全加固
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# 输出统一走 stdout，由 journald 收集；本目录可读写（如需本地排障文件）
+ReadWritePaths=/opt/sms-middleware
+
+[Install]
+WantedBy=multi-user.target

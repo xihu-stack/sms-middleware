@@ -1,0 +1,15 @@
+# 编译产物
+/sms-middleware*
+*.exe
+*.test
+
+# 本地真实配置（含密钥，勿提交）
+config.local.env
+.env
+
+# Go
+/vendor/
+
+# IDE
+.idea/
+.vscode/
