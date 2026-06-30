@@ -11,6 +11,85 @@
 
 上游监控系统只能按「短信网关」(HTTP POST + JSON Body) 配置发短信，但无法直接调用阿里云（需要 HMAC 签名 + 签名/模板）。本中间件做协议适配：上游 `POST` 一个 `{"to","content"}`，中间件用阿里云**通用模板透传**把整段 `content` 作为模板变量发出。
 
+## 快速开始：从 GitHub 一步步部署
+
+> 目标：从本仓库源码出发，在 Linux 服务器上跑起来，并发出第一条真实告警短信。全程约 10 分钟（阿里云签名/模板审核另算，需提前申请）。
+
+### 前置条件
+- 一台 Linux 服务器，能访问阿里云 `dysmsapi.aliyuncs.com`
+- 阿里云短信已就绪（详见下文「阿里云配置」）：**签名 SignName**、**模板 TemplateCode**（内容含 `${content}` 变量）、**RAM 子账号 AccessKey**（有 `SendSms` 权限）
+- 知道**监控系统的出口 IP / 内网网段**（用于白名单）
+
+### Step 1：取代码
+```bash
+git clone https://github.com/xihu-stack/sms-middleware.git
+cd sms-middleware
+```
+
+### Step 2：编译（二选一）
+
+**A. 直接在 Linux 上编译**（需先装 Go ≥ 1.22，见 https://go.dev/dl ）：
+```bash
+go build -o sms-middleware          # 产物：sms-middleware（无依赖单文件）
+```
+
+**B. 没有 Go？在 Windows 上交叉编译再传上来：**
+```powershell
+.\build.ps1                         # 生成 sms-middleware-linux-amd64 / -arm64
+scp sms-middleware-linux-amd64 install.sh user@服务器IP:/tmp/
+```
+> 编译产物 `sms-middleware` 必须和 `install.sh` 在**同一目录**。
+
+### Step 3：一键安装并配置
+```bash
+sudo bash install.sh
+```
+脚本会逐项问你（回车可保留上次填的值）：
+- AccessKey ID / Secret
+- 签名 SignName、模板 TemplateCode、模板变量名（默认 `content`）
+- IP 白名单（填监控系统来源 IP/网段，如 `10.0.0.0/8`）
+- 监听端口（默认 `8080`）
+
+它会自动：写配置 → 安装 systemd 服务 → 启动 → 放行端口。
+
+### Step 4：确认服务在跑
+```bash
+sudo systemctl status sms-middleware     # 看到 active (running) 即正常
+curl http://127.0.0.1:8080/health        # 返回 {"status":"ok"}
+sudo journalctl -u sms-middleware -f     # 实时日志（Ctrl+C 退出）
+```
+
+### Step 5：发第一条测试短信
+```bash
+curl -X POST http://127.0.0.1:8080/sms/send \
+  -H 'Content-Type: application/json' \
+  -d '{"to":"你的手机号","content":"机房告警：联调测试"}'
+```
+返回 `{"code":"OK",...}` 且手机收到短信 = **部署成功** 🎉
+若返回 `502`，看响应里的 `aliyun_code`，对照下方排错表。
+
+### Step 6：把监控系统接进来
+在上游监控系统的「短信网关」配置里填：
+- 接口类型：HTTP；发送方式：POST；编码：UTF-8；参数位置：BODY；参数类型：JSON
+- **地址**：`http://<中间件服务器IP>:8080/sms/send`
+- **请求体**：`{"to":"${TELEPHONENUMBER}","content":"${MSGCONTENT}"}`
+- 确保中间件的 `IP_ALLOWLIST` 包含该监控系统的出口 IP
+
+### 常见报错（按返回的 `aliyun_code` 或 HTTP 状态排查）
+| 返回 | 含义 | 处理 |
+|---|---|---|
+| `isv.SMS_TEMPLATE_ILLEGAL` | 模板/变量名不符 | 核对 TemplateCode 与 `ALIYUN_TEMPLATE_PARAM_KEY`（须与模板变量名一致） |
+| `isv.SMS_SIGNATURE_ILLEGAL` | 签名不符/未过审 | 核对 SignName，确认签名已审核通过 |
+| `SignatureDoesNotMatch` | Secret 错 | 核对 AccessKeySecret（去掉前后空格） |
+| `InvalidAccessKeyId.NotFound` | ID 错 | 核对 AccessKeyId |
+| `isv.BUSINESS_LIMIT_CONTROL` | 频率限流 | 同号码约 1 条/分钟，稍后重发 |
+| `isv.MOBILE_NUMBER_ILLEGAL` | 号码格式错 | 用 11 位国内号 |
+| HTTP `403` | 来源 IP 不在白名单 | 把监控出口 IP 加进 `IP_ALLOWLIST` 后重启服务 |
+
+> 改完配置只需：`sudo systemctl restart sms-middleware`
+
+---
+
 ## 请求 / 响应
 
 ### 发送短信
