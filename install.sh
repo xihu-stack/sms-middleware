@@ -39,8 +39,9 @@ fi
 
 # 2) 收集配置（仅 5 项必填；其余用默认值，可之后改 config.env）
 old() { { [ -f "$INSTALL_DIR/config.env" ] && grep -m1 -E "^$1=" "$INSTALL_DIR/config.env" | cut -d= -f2-; } || true; }
-ask()  { local p="$1" d="${2-}" v; read -rp "$p${d:+ [$d]}: " v || v=""; ANS="${v:-$d}"; }
-asks() { local p="$1" d="${2-}" v; read -rsp "$p${d:+ (回车保留)}: " v; echo; ANS="${v:-$d}"; }
+# 注意：read 必须从 /dev/tty 读，否则 `curl | bash` 管道模式下 stdin 是脚本本身，会读到脚本行而非键盘输入。
+ask()  { local p="$1" d="${2-}" v; read -rp "$p${d:+ [$d]}: " v </dev/tty 2>/dev/null || v=""; ANS="${v:-$d}"; }
+asks() { local p="$1" d="${2-}" v; read -rsp "$p${d:+ (回车保留)}: " v </dev/tty 2>/dev/null || v=""; echo; ANS="${v:-$d}"; }
 
 echo "=== 阿里云短信配置（回车保留已存值）==="
 ask  "AccessKey ID"             "$(old ALIYUN_ACCESS_KEY_ID)";     AK="$ANS"
