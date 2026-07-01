@@ -150,18 +150,54 @@ $env:ALIYUN_TEMPLATE_CODE="SMS_xxxxxxxxx"
 
 ## 上游系统（短信网关）如何配置
 
-参照截图，把中间件当作 HTTPS/HTTP 短信网关填：
+在你的**监控系统 / 源头系统**的"短信网关"里，把中间件当作一个 HTTP 短信网关来填：
 
-- 接口类型：HTTP（也支持 HTTPS）
-- 发送方式：POST
-- 编码格式：UTF-8
-- 参数位置：BODY
-- 参数类型：JSON
-- **HTTP 地址**：`http://<中间件内网IP>:8080/sms/send`
-- **请求体**：
-  ```json
-  {"to":"${TELEPHONENUMBER}","content":"${MSGCONTENT}"}
-  ```
+| 配置字段 | 填什么 |
+|---|---|
+| 接口类型 | `HTTP` |
+| 发送方式 | `POST` |
+| 编码格式 | `UTF-8` |
+| 参数位置 | `BODY` |
+| 参数类型 | `JSON` |
+| TLS 版本 | HTTP 用不到，留默认 |
+| 查询参数 | 留空 |
+| 请求头 | 留空（或加一行 `Content-Type: application/json`）|
+| **HTTP 地址** | `http://<中间件服务器IP>:8080/sms/send` |
+| **请求体** | `{"to":"${TELEPHONENUMBER}","content":"${MSGCONTENT}"}` |
+
+**两个要点：**
+1. **地址里的 IP** 用监控系统能访问到中间件的那个 IP：同机用 `127.0.0.1`；同内网用内网 IP；跨网段用可路由 IP。
+2. **请求体两个变量必须一字不差**：`${TELEPHONENUMBER}`（手机号）、`${MSGCONTENT}`（短信内容）是监控系统自带的固定变量，发送时自动替换。键名 `to` / `content` 是中间件识别的，不要改。
+
+监控系统替换变量后实际发出的请求体形如：
+```json
+{"to":"13800138000","content":"主机 web-01 CPU 95%，超过阈值"}
+```
+
+### ⚠️ 必做：把监控系统的 IP 加进白名单（否则 403）
+中间件只放行 `IP_ALLOWLIST` 里的来源。如果不知道监控系统出口 IP，用"反向查 IP"最省事：
+
+1. 在监控系统配好上面的网关，**触发一次告警 / 测试发送**。
+2. 到中间件服务器看拒绝日志：
+   ```bash
+   sudo journalctl -u sms-middleware -g "denied" --no-pager
+   ```
+   会看到类似 `msg="request denied by ip allowlist" remote=10.0.0.50:xxxxx` —— `10.0.0.50` 就是监控系统的出口 IP。
+3. 加进白名单并重启：
+   ```bash
+   sudo vi /opt/sms-middleware/config.env     # IP_ALLOWLIST=10.0.0.0/8,10.0.0.50
+   sudo systemctl restart sms-middleware
+   ```
+4. 监控系统再发一次 → 成功。
+
+### 验证整条链路
+监控系统触发告警时，中间件上实时看日志：
+```bash
+sudo journalctl -u sms-middleware -f
+```
+看到 `http request ... path=/sms/send status=200` 紧接 `sms sent` + 手机收到告警 = **正式上线**。
+
+> 若监控系统强制只填 `https://`，而中间件是 HTTP：放同一台机器用 `127.0.0.1`，或在中间件前加 nginx 做 HTTPS 反代。
 
 ## 测试
 
