@@ -60,6 +60,9 @@ mkdir -p "$INSTALL_DIR"
 install -m 0755 "$BIN" "$INSTALL_DIR/sms-middleware"
 [ "$DOWNLOADED" = 1 ] && rm -f "$BIN"
 
+# 保留已有的 SMS_MAX_LEN（重跑不丢失），默认 0=不截断
+OLD_MAX="$(old SMS_MAX_LEN)"; [ -z "$OLD_MAX" ] && OLD_MAX=0
+
 cat > "$INSTALL_DIR/config.env" <<EOF
 LISTEN=:$PORT
 IP_ALLOWLIST=$IP
@@ -69,8 +72,9 @@ ALIYUN_ACCESS_KEY_SECRET=$SK
 ALIYUN_SIGN_NAME=$SIGN
 ALIYUN_TEMPLATE_CODE=$TPL
 ALIYUN_TEMPLATE_PARAM_KEY=content
-ALIYUN_TIMEOUT=5s
+ALIYUN_TIMEOUT=15s
 ALIYUN_ENDPOINT=https://dysmsapi.aliyuncs.com
+SMS_MAX_LEN=$OLD_MAX
 EOF
 chmod 600 "$INSTALL_DIR/config.env"
 echo "已写入 $INSTALL_DIR/config.env"

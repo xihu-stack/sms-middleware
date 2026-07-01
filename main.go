@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -22,12 +23,14 @@ type Config struct {
 	Allowlist []netip.Prefix
 	Aliyun    AliyunConfig
 	Timeout   time.Duration
+	SMSMaxLen int // >0 时把 content 按字符截断，规避阿里云模板变量长度限制
 }
 
 func loadConfig() (Config, error) {
 	cfg := Config{
-		Listen:  getenv("LISTEN", ":8080"),
-		Timeout: getDuration("ALIYUN_TIMEOUT", 5*time.Second),
+		Listen:    getenv("LISTEN", ":8080"),
+		Timeout:   getDuration("ALIYUN_TIMEOUT", 5*time.Second),
+		SMSMaxLen: getInt("SMS_MAX_LEN", 0),
 		Aliyun: AliyunConfig{
 			AccessKeyID:      os.Getenv("ALIYUN_ACCESS_KEY_ID"),
 			AccessKeySecret:  os.Getenv("ALIYUN_ACCESS_KEY_SECRET"),
@@ -73,6 +76,15 @@ func getDuration(key string, def time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			return d
+		}
+	}
+	return def
+}
+
+func getInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
 		}
 	}
 	return def
@@ -147,6 +159,22 @@ func maskPhone(phone string) string {
 		return strings.Repeat("*", len(r))
 	}
 	return string(r[:3]) + strings.Repeat("*", len(r)-7) + string(r[len(r)-4:])
+}
+
+// truncateContent truncates s to max runes (字符数，与阿里云变量长度计数一致)，
+// 超过时截断并末尾加 "…"。max<=0 表示不截断。
+func truncateContent(s string, max int) string {
+	if max <= 0 {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	if max == 1 {
+		return "…"
+	}
+	return string(r[:max-1]) + "…"
 }
 
 // app holds runtime dependencies shared by HTTP handlers.
@@ -244,6 +272,13 @@ func (a *app) send(w http.ResponseWriter, r *http.Request) {
 		a.log.Warn("bad request", "reason", missing, "remote", r.RemoteAddr)
 		writeJSON(w, http.StatusBadRequest, apiError("BAD_REQUEST", "'to' and 'content' are required"))
 		return
+	}
+
+	origContent := req.Content
+	req.Content = truncateContent(req.Content, a.cfg.SMSMaxLen)
+	if req.Content != origContent {
+		a.log.Warn("content truncated for aliyun length limit",
+			"orig_len", len([]rune(origContent)), "max", a.cfg.SMSMaxLen, "to", maskPhone(req.To))
 	}
 
 	key := a.cfg.Aliyun.TemplateParamKey

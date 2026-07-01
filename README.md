@@ -55,6 +55,7 @@ curl -X POST http://127.0.0.1:8080/sms/send -H 'Content-Type: application/json' 
 | 返回 | 处理 |
 |---|---|
 | `isv.SMS_TEMPLATE_ILLEGAL` | 核对 TemplateCode、`ALIYUN_TEMPLATE_PARAM_KEY` 与模板变量名一致 |
+| `isv.PARAM_LENGTH_LIMIT` | 内容超阿里云模板变量长度上限 → 设 `SMS_MAX_LEN` 为该上限（如 30），中间件自动截断 |
 | `isv.SMS_SIGNATURE_ILLEGAL` | 核对 SignName，确认签名已过审 |
 | `SignatureDoesNotMatch` / `InvalidAccessKeyId.NotFound` | AccessKey / Secret 填错 |
 | `isv.BUSINESS_LIMIT_CONTROL` | 同号码限流（约 1 条/分钟），稍后重发 |
@@ -113,7 +114,7 @@ GET /health  ->  200 {"status":"ok"}
 | `ALIYUN_TEMPLATE_CODE` | 短信模板 CODE |
 | `IP_ALLOWLIST` | 监控系统来源 IP/CIDR，逗号分隔 |
 
-可选项（带默认值）：`LISTEN=:8080`、`ALIYUN_REGION=cn-hangzhou`、`ALIYUN_TEMPLATE_PARAM_KEY=content`、`ALIYUN_TIMEOUT=5s`、`ALIYUN_ENDPOINT=https://dysmsapi.aliyuncs.com`。
+可选项（带默认值）：`LISTEN=:8080`、`ALIYUN_REGION=cn-hangzhou`、`ALIYUN_TEMPLATE_PARAM_KEY=content`、`ALIYUN_TIMEOUT=15s`、`ALIYUN_ENDPOINT=https://dysmsapi.aliyuncs.com`、`SMS_MAX_LEN=0`（>0 时超长内容自动截断，规避阿里云变量长度限制）。
 
 > `IP_ALLOWLIST` 为空时**全部拒绝**（失败关闭），因为白名单是唯一鉴权手段。
 

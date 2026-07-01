@@ -308,3 +308,63 @@ func TestSendHandler_LogsBadRequest(t *testing.T) {
 		t.Errorf("expected 'bad request' log: %s", buf.String())
 	}
 }
+
+func TestTruncateContent(t *testing.T) {
+	cases := []struct {
+		in   string
+		max  int
+		want string
+	}{
+		{"abc", 0, "abc"},      // no limit
+		{"abc", 5, "abc"},      // under limit
+		{"abcde", 5, "abcde"},  // equal -> no truncation
+		{"abcdef", 5, "abcd…"}, // over -> max-1 runes + ellipsis
+		{"ab", 1, "…"},
+		{"服务器CPU使用率95%超过阈值请立刻处理", 6, "服务器CP…"}, // rune-aware (中文按字符计)
+	}
+	for _, c := range cases {
+		if got := truncateContent(c.in, c.max); got != c.want {
+			t.Errorf("truncateContent(%q, %d) = %q, want %q", c.in, c.max, got, c.want)
+		}
+	}
+}
+
+func TestSendHandler_TruncatesLongContent(t *testing.T) {
+	var gotTpl string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTpl = r.URL.Query().Get("TemplateParam")
+		_, _ = io.WriteString(w, `{"Code":"OK","BizId":"b","RequestId":"r"}`)
+	}))
+	defer srv.Close()
+
+	cfg := Config{
+		Allowlist: mustAllow(t, "127.0.0.1"),
+		Timeout:   2 * time.Second,
+		SMSMaxLen: 10,
+		Aliyun: AliyunConfig{
+			AccessKeyID: "id", AccessKeySecret: "s",
+			SignName: "S", TemplateCode: "T", TemplateParamKey: "content",
+			Endpoint: srv.URL,
+		},
+	}
+	log, buf := bufferLogger()
+	a := &app{cfg: cfg, log: log, client: srv.Client()}
+
+	req := httptest.NewRequest(http.MethodPost, "/sms/send",
+		strings.NewReader(`{"to":"13800000000","content":"abcdefghijklmn"}`)) // 14 chars
+	req.RemoteAddr = "127.0.0.1:1"
+	rec := httptest.NewRecorder()
+	a.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	// 14 chars, max 10 -> 9 chars + "…"
+	want := `{"content":"abcdefghi…"}`
+	if gotTpl != want {
+		t.Errorf("TemplateParam = %q, want %q", gotTpl, want)
+	}
+	if !strings.Contains(buf.String(), "content truncated") {
+		t.Errorf("expected truncation log: %s", buf.String())
+	}
+}
