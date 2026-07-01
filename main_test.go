@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"log/slog"
 	"net/http"
@@ -239,5 +240,71 @@ func TestSendHandler_TemplateParamKeyConfigurable(t *testing.T) {
 	}
 	if gotTpl != `{"msg":"hello"}` {
 		t.Errorf("TemplateParam should use configured key 'msg', got %q", gotTpl)
+	}
+}
+
+func bufferLogger() (*slog.Logger, *bytes.Buffer) {
+	var buf bytes.Buffer
+	return slog.New(slog.NewTextHandler(&buf, nil)), &buf
+}
+
+func TestStatusWriter(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sw := &statusWriter{ResponseWriter: rec}
+	sw.WriteHeader(http.StatusNotFound)
+	if sw.status != http.StatusNotFound {
+		t.Errorf("status=%d want 404", sw.status)
+	}
+	if _, err := sw.Write([]byte("hi")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if sw.bytes != 2 {
+		t.Errorf("bytes=%d want 2", sw.bytes)
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("underlying status=%d want 404", rec.Code)
+	}
+}
+
+func TestAccessLog(t *testing.T) {
+	log, buf := bufferLogger()
+	a := &app{cfg: Config{}, log: log}
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	a.accessLog(http.HandlerFunc(a.health)).ServeHTTP(rec, req)
+	if !strings.Contains(buf.String(), "http request") {
+		t.Errorf("missing access log line: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "status=200") {
+		t.Errorf("missing status=200: %s", buf.String())
+	}
+}
+
+func TestAccessLog_WarnsOn4xx(t *testing.T) {
+	log, buf := bufferLogger()
+	a := &app{cfg: Config{Allowlist: nil}, log: log} // deny all -> 403
+	req := httptest.NewRequest(http.MethodPost, "/sms/send", strings.NewReader(`{"to":"1","content":"x"}`))
+	rec := httptest.NewRecorder()
+	a.routes().ServeHTTP(rec, req)
+	if !strings.Contains(buf.String(), "status=403") {
+		t.Errorf("expected status=403: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "level=WARN") {
+		t.Errorf("expected WARN level for 4xx: %s", buf.String())
+	}
+}
+
+func TestSendHandler_LogsBadRequest(t *testing.T) {
+	log, buf := bufferLogger()
+	a := &app{cfg: Config{Allowlist: mustAllow(t, "127.0.0.1")}, log: log}
+	req := httptest.NewRequest(http.MethodPost, "/sms/send", strings.NewReader(`{bad`))
+	req.RemoteAddr = "127.0.0.1:1"
+	rec := httptest.NewRecorder()
+	a.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d want 400", rec.Code)
+	}
+	if !strings.Contains(buf.String(), "bad request") {
+		t.Errorf("expected 'bad request' log: %s", buf.String())
 	}
 }

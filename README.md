@@ -177,6 +177,36 @@ curl -X POST http://127.0.0.1:8080/sms/send \
 
 返回 `200 {"code":"OK",...}` 且手机收到短信即联调成功。若返回 502，看响应体里的 `aliyun_code` 对照阿里云错误码排查（常见：`isv.BUSINESS_LIMIT_CONTROL` 限流、`isv.SMS_TEMPLATE_ILLEGAL` 模板不符、`SignatureNonceUsed` 重放等）。
 
+## 日志与排错
+
+服务输出结构化日志到 stdout，systemd 下由 journald 收集。**查看日志：**
+```bash
+sudo journalctl -u sms-middleware -f             # 实时跟踪（最常用）
+sudo journalctl -u sms-middleware --since "10 min ago"
+sudo journalctl -u sms-middleware -p err          # 只看 ERROR
+sudo journalctl -u sms-middleware -g "aliyun"     # 按关键字过滤
+```
+
+**每个请求都有一行访问日志**（状态 ≥400 自动降为 WARN）：
+```
+level=INFO msg="http request" remote=10.0.0.5:54321 method=POST path=/sms/send status=200 bytes=58 duration_ms=420
+```
+
+**关键日志含义**：
+| msg 字段 | 含义 |
+|---|---|
+| `http request` | 每个请求一行：来源 IP / 方法 / 路径 / 状态 / 总耗时 |
+| `sms sent` | 发送成功：号码(脱敏)、内容长度、biz_id、`aliyun_ms` |
+| `bad request` | 400 参数错：原因（JSON 非法 / `to` 空 / `content` 空） |
+| `request denied by ip allowlist` | 403：来源 IP 不在白名单 |
+| `aliyun business error` | 阿里云业务错：`code`/`message`/`request_id`/`aliyun_ms` |
+| `aliyun call failed` | 调阿里云网络/超时：`err` + `aliyun_ms` |
+
+**快速定位问题**：
+- **收不到短信** → `journalctl -g "sms sent"` 看有没有成功；没有就顺次查 `bad request` / `denied` / `aliyun business error`，定位卡在哪一步。
+- **慢** → 对比 `duration_ms`（总耗时）和 `aliyun_ms`（阿里云调用耗时），判断是阿里云慢还是网络慢。
+- 号码自动脱敏（如 `138****8000`）；短信内容只记长度，不记明文，避免泄露。
+
 ## 注意事项
 
 - **限流**：同一号码约 1 条/分钟，告警突发可能触发 `isv.BUSINESS_LIMIT_CONTROL`，返回 502 由上游重发；中间件无状态、不本地排队。

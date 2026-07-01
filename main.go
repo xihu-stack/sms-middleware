@@ -160,7 +160,46 @@ func (a *app) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", a.health)
 	mux.HandleFunc("POST /sms/send", a.ipFilter(a.send))
-	return mux
+	return a.accessLog(mux)
+}
+
+// statusWriter captures the response status code and bytes written for logging.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (w *statusWriter) WriteHeader(s int) {
+	if w.status == 0 {
+		w.status = s
+	}
+	w.ResponseWriter.WriteHeader(s)
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	n, err := w.ResponseWriter.Write(b)
+	w.bytes += n
+	return n, err
+}
+
+// accessLog emits one structured log line per request (WARN when status >= 400).
+func (a *app) accessLog(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w}
+		next.ServeHTTP(sw, r)
+		lvl := slog.LevelInfo
+		if sw.status >= 400 {
+			lvl = slog.LevelWarn
+		}
+		a.log.Log(context.Background(), lvl, "http request",
+			"remote", r.RemoteAddr, "method", r.Method, "path", r.URL.Path,
+			"status", sw.status, "bytes", sw.bytes, "duration_ms", time.Since(start).Milliseconds())
+	})
 }
 
 // ipFilter rejects requests whose source IP is not in the allowlist.
@@ -188,12 +227,21 @@ type sendRequest struct {
 func (a *app) send(w http.ResponseWriter, r *http.Request) {
 	var req sendRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.log.Warn("bad request", "reason", "invalid JSON", "err", err, "remote", r.RemoteAddr)
 		writeJSON(w, http.StatusBadRequest, apiError("BAD_REQUEST", "invalid JSON body"))
 		return
 	}
 	req.To = strings.TrimSpace(req.To)
 	req.Content = strings.TrimSpace(req.Content)
 	if req.To == "" || req.Content == "" {
+		missing := "'to' and 'content' are required"
+		switch {
+		case req.To == "" && req.Content != "":
+			missing = "'to' is empty"
+		case req.Content == "" && req.To != "":
+			missing = "'content' is empty"
+		}
+		a.log.Warn("bad request", "reason", missing, "remote", r.RemoteAddr)
 		writeJSON(w, http.StatusBadRequest, apiError("BAD_REQUEST", "'to' and 'content' are required"))
 		return
 	}
@@ -207,15 +255,18 @@ func (a *app) send(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), a.cfg.Timeout)
 	defer cancel()
 
+	t0 := time.Now()
 	res, err := SendSms(ctx, a.client, a.cfg.Aliyun, req.To, string(templateParam))
+	aliyunMs := time.Since(t0).Milliseconds()
 	if err != nil {
-		a.log.Error("aliyun call failed", "to", maskPhone(req.To), "err", err)
+		a.log.Error("aliyun call failed", "to", maskPhone(req.To), "err", err, "aliyun_ms", aliyunMs)
 		writeJSON(w, http.StatusBadGateway, apiError("UPSTREAM_UNAVAILABLE"))
 		return
 	}
 	if res.Code != "OK" {
 		a.log.Error("aliyun business error",
-			"to", maskPhone(req.To), "code", res.Code, "message", res.Message, "request_id", res.RequestId)
+			"to", maskPhone(req.To), "code", res.Code, "message", res.Message,
+			"request_id", res.RequestId, "aliyun_ms", aliyunMs)
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"code":        "UPSTREAM_ERROR",
 			"aliyun_code": res.Code,
@@ -227,7 +278,7 @@ func (a *app) send(w http.ResponseWriter, r *http.Request) {
 
 	a.log.Info("sms sent",
 		"to", maskPhone(req.To), "len", len(req.Content),
-		"biz_id", res.BizId, "request_id", res.RequestId)
+		"biz_id", res.BizId, "request_id", res.RequestId, "aliyun_ms", aliyunMs)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"code":       "OK",
 		"biz_id":     res.BizId,
