@@ -19,6 +19,12 @@
 curl -fsSL https://raw.githubusercontent.com/xihu-stack/sms-middleware/main/install.sh | sudo bash
 ```
 
+> 不确定服务器是否满足要求？先跑预检（只读、不改系统）：
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/xihu-stack/sms-middleware/main/preflight.sh | bash
+> ```
+> 检查架构、资源、curl/systemd、以及能否连通阿里云（出站 443）和 GitHub。
+
 脚本只问 5 项（其余用默认值）：
 - AccessKey ID / Secret
 - 签名 SignName、模板 TemplateCode
