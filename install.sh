@@ -39,9 +39,10 @@ fi
 
 # 2) 收集配置（仅 5 项必填；其余用默认值，可之后改 config.env）
 old() { { [ -f "$INSTALL_DIR/config.env" ] && grep -m1 -E "^$1=" "$INSTALL_DIR/config.env" | cut -d= -f2-; } || true; }
-# 注意：read 必须从 /dev/tty 读，否则 `curl | bash` 管道模式下 stdin 是脚本本身，会读到脚本行而非键盘输入。
-ask()  { local p="$1" d="${2-}" v; read -rp "$p${d:+ [$d]}: " v </dev/tty 2>/dev/null || v=""; ANS="${v:-$d}"; }
-asks() { local p="$1" d="${2-}" v; read -rsp "$p${d:+ (回车保留)}: " v </dev/tty 2>/dev/null || v=""; echo; ANS="${v:-$d}"; }
+# 注意：read 必须从 /dev/tty 读，否则 `curl | bash` 管道模式下 stdin 是脚本本身。
+# 提示用 printf 显式打到 stderr（read -p 的提示也在 stderr，配合 2>/dev/null 会被吞掉，所以不用 -p）。
+ask()  { local p="$1" d="${2-}" v; printf '%s%s: ' "$p" "${d:+ [$d]}" >&2; read v </dev/tty 2>/dev/null || v=""; ANS="${v:-$d}"; }
+asks() { local p="$1" d="${2-}" v; printf '%s%s: ' "$p" "${d:+ (回车保留)}" >&2; read -rs v </dev/tty 2>/dev/null || v=""; printf '\n' >&2; ANS="${v:-$d}"; }
 
 echo "=== 阿里云短信配置（回车保留已存值）==="
 ask  "AccessKey ID"             "$(old ALIYUN_ACCESS_KEY_ID)";     AK="$ANS"
